@@ -8,7 +8,54 @@ from scipy import ndimage
 #from sklearn.mixture import GaussianMixture
 #from sklearn.cluster import KMeans
 
-def ncut(feats, dims, scales, init_image_size, tau = 0, eps=1e-5, im_name='', no_binary_graph=False):
+def find_best_ncut_threshold(eigenvec, W, d_i, n_thresholds=40):
+    """
+    Find the threshold that minimises the normalised-cut energy (Shi & Malik 2000).
+
+    NCut(A,B) = cut(A,B)/assoc(A,V)  +  cut(A,B)/assoc(B,V)
+
+    where
+      cut(A,B)   = sum of W[i,j] for i in A, j in B
+      assoc(A,V) = sum of W[i,j] for i in A, all j  = sum of d_i[i] for i in A
+
+    We sweep `n_thresholds` candidate values uniformly between
+    min(eigenvec) and max(eigenvec) and pick the cheapest cut.
+    """
+    lo, hi = eigenvec.min(), eigenvec.max()
+    thresholds = np.linspace(lo, hi, n_thresholds + 2)[1:-1]  # exclude endpoints
+
+    best_thresh = thresholds[0]
+    best_energy = np.inf
+
+    assoc_total = d_i.sum()  # == assoc(V, V)
+
+    for t in thresholds:
+        mask_A = eigenvec >= t   # boolean, shape (N,)
+        mask_B = ~mask_A
+
+        assoc_A = d_i[mask_A].sum()
+        assoc_B = assoc_total - assoc_A
+
+        if assoc_A == 0 or assoc_B == 0:
+            continue  # degenerate cut – skip
+
+        # cut(A,B) = sum_{i in A, j in B} W[i,j]
+        # Efficient: cut = assoc_A - sum_{i in A, j in A} W[i,j]
+        W_AA = W[np.ix_(mask_A, mask_A)].sum()
+        cut_AB = assoc_A - W_AA
+
+        energy = cut_AB / assoc_A + cut_AB / assoc_B
+
+        if energy < best_energy:
+            best_energy = energy
+            best_thresh = t
+
+    return best_thresh
+
+
+def ncut(feats, dims, scales, init_image_size, tau=0, eps=1e-5,
+         im_name='', no_binary_graph=False,
+         spatial_weight=5, spatial_sigma=9.0):
     """
     Implementation of NCut Method.
     Inputs
@@ -20,11 +67,29 @@ def ncut(feats, dims, scales, init_image_size, tau = 0, eps=1e-5, im_name='', no
       eps: graph edge weight
       im_name: image_name
       no_binary_graph: ablation study for using similarity score as graph edge weight
+      spatial_weight: scalar alpha that weights the Gaussian spatial affinity term
+      spatial_sigma: sigma (in patch units) for the Gaussian: exp(-||i-j||^2 / sigma^2)
     """
     feats = F.normalize(feats, p=2, dim=0)
     A = (feats.transpose(0,1) @ feats)
     A = A.cpu().numpy()
-    A = A + 0.1*(A@A)  
+    # A = A + 0.1*(A@A)  
+    
+    # --- Optional spatial affinity term ---
+    # Build a Gaussian kernel over patch grid distances and blend with cosine sim.
+    if spatial_weight > 0:
+        feat_h, feat_w = dims
+        N = feat_h * feat_w
+        # Grid positions for every patch (row, col)
+        rows = np.arange(feat_h).repeat(feat_w)               # shape (N,)
+        cols = np.tile(np.arange(feat_w), feat_h)             # shape (N,)
+        # Pairwise squared distances in patch-grid units
+        dr = (rows[:, None] - rows[None, :]).astype(np.float32)  # (N, N)
+        dc = (cols[:, None] - cols[None, :]).astype(np.float32)  # (N, N)
+        dist2 = dr ** 2 + dc ** 2
+        spatial_kernel = np.exp(-dist2 / (spatial_sigma ** 2))    # (N, N)
+        A = A + spatial_weight * spatial_kernel
+
     A_raw = A.copy()  # save raw cosine similarities before thresholding
     if no_binary_graph:
         A[A<tau] = eps
@@ -37,12 +102,16 @@ def ncut(feats, dims, scales, init_image_size, tau = 0, eps=1e-5, im_name='', no
     # Print second and third smallest eigenvector
     _, eigenvectors = eigh(D-A, D, subset_by_index=[1,2])
     eigenvec = np.copy(eigenvectors[:, 0])
-
-
-    # method1 avg
     second_smallest_vec = eigenvectors[:, 0]
-    avg = np.sum(second_smallest_vec) / len(second_smallest_vec)
-    bipartition = second_smallest_vec > avg
+
+    # ---- Bipartition via NCut energy minimisation ----
+    # Sweep 40 thresholds between min and max of the eigenvector,
+    # pick the one with the lowest NCut(A,B) energy.
+    best_t = find_best_ncut_threshold(second_smallest_vec, A, d_i, n_thresholds=50)
+    bipartition = second_smallest_vec >= best_t
+    # # # old — mean threshold
+    # avg = np.sum(second_smallest_vec) / len(second_smallest_vec)
+    # bipartition = second_smallest_vec > avg
 
     seed = np.argmax(np.abs(second_smallest_vec))
 
@@ -51,13 +120,14 @@ def ncut(feats, dims, scales, init_image_size, tau = 0, eps=1e-5, im_name='', no
         bipartition = np.logical_not(bipartition)
     bipartition = bipartition.reshape(dims).astype(float)
 
-    # predict BBox
-    pred, _, objects,cc = detect_box(bipartition, seed, dims, scales=scales, initial_im_size=init_image_size) ## We only extract the principal object BBox
+    # predict BBox — commented out to keep ALL foreground connected components
+    pred, _, objects,cc = detect_box(bipartition, seed, dims, scales=scales, initial_im_size=init_image_size)
     mask = np.zeros(dims)
     mask[cc[0],cc[1]] = 1
-
     mask = torch.from_numpy(mask).to('cpu')
-#    mask = torch.from_numpy(bipartition).to('cpu')
+
+    # Use the full bipartition mask (all foreground patches, not just seed's CC)
+    # mask = torch.from_numpy(bipartition).to('cpu')
     bipartition = F.interpolate(mask.unsqueeze(0).unsqueeze(0), size=init_image_size, mode='nearest').squeeze()
     
 

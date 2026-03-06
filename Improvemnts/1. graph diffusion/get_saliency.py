@@ -26,16 +26,14 @@ ToTensor = transforms.Compose([
                                 transforms.Normalize((0.485, 0.456, 0.406),
                                                      (0.229, 0.224, 0.225)),])
 
-def get_tokencut_binary_map(img_pth, backbone, patch_size, tau, spatial_weight=0.0, spatial_sigma=1.0) :
+def get_tokencut_binary_map(img_pth, backbone,patch_size, tau) :
     I = Image.open(img_pth).convert('RGB')
     I_resize, w, h, feat_w, feat_h = utils.resize_pil(I, patch_size)
 
     tensor = ToTensor(I_resize).unsqueeze(0).cpu()
     feat = backbone(tensor)[0]
 
-    seed, bipartition, eigvec, affinity = tokencut.ncut(
-        feat, [feat_h, feat_w], [patch_size, patch_size], [h, w], tau,
-        spatial_weight=spatial_weight, spatial_sigma=spatial_sigma)
+    seed, bipartition, eigvec, affinity = tokencut.ncut(feat, [feat_h, feat_w], [patch_size, patch_size], [h,w], tau)
     return bipartition, eigvec, affinity
 
 def mask_color_compose(org, mask, mask_color = [173, 216, 230]) :
@@ -65,11 +63,6 @@ parser.add_argument('--sigma-spatial', type=float, default=16, help='sigma spati
 parser.add_argument('--sigma-luma', type=float, default=16, help='sigma luma in the bilateral solver')
 
 parser.add_argument('--sigma-chroma', type=float, default=8, help='sigma chroma in the bilateral solver')
-
-parser.add_argument('--spatial-weight', type=float, default=0.5,
-                    help='Weight (alpha) for the Gaussian spatial affinity term added to cosine similarity. 0 disables it.')
-parser.add_argument('--spatial-sigma', type=float, default=6.0,
-                    help='Sigma (in patch units) for the spatial Gaussian: exp(-||i-j||^2 / sigma^2)')
 
 
 parser.add_argument('--dataset', type=str, default=None, choices=['ECSSD', 'DUTS', 'DUT', None], help='which dataset?')
@@ -151,9 +144,7 @@ for img_name in tqdm(img_list) :
     else:
         img_pth = os.path.join(args.img_dir, img_name)
     
-    bipartition, eigvec, affinity = get_tokencut_binary_map(
-        img_pth, backbone, args.patch_size, args.tau,
-        spatial_weight=args.spatial_weight, spatial_sigma=args.spatial_sigma)
+    bipartition, eigvec, affinity = get_tokencut_binary_map(img_pth, backbone, args.patch_size, args.tau)
     mask_lost.append(bipartition)
 
     output_solver, binary_solver = bilateral_solver.bilateral_solver_output(img_pth, bipartition, sigma_spatial = args.sigma_spatial, sigma_luma = args.sigma_luma, sigma_chroma = args.sigma_chroma)
@@ -173,30 +164,12 @@ for img_name in tqdm(img_list) :
         out_lost = os.path.join(args.out_dir, img_name.replace('.jpg', '_tokencut.jpg'))
         out_bfs = os.path.join(args.out_dir, img_name.replace('.jpg', '_tokencut_bfs.jpg'))
         out_affinity = os.path.join(args.out_dir, img_name.replace('.jpg', '_affinity.png'))
-        out_eigvec = os.path.join(args.out_dir, img_name.replace('.jpg', '_eigen_attention.png'))
-        out_eigvec_overlay = os.path.join(args.out_dir, img_name.replace('.jpg', '_eigen_attention_overlay.png'))
+        #out_eigvec = os.path.join(args.out_dir, img_name.replace('.jpg', '_tokencut_eigvec.jpg'))
 
         copyfile(img_pth, out_name)
         org = np.array(Image.open(img_pth).convert('RGB'))
 
-        # --- Eigen-attention: standalone heatmap ---
-        # Use diverging colormap (RdBu_r) since eigvec has positive & negative values
-        fig, ax = plt.subplots(figsize=(6, 6))
-        im = ax.imshow(eigvec, cmap='RdBu_r', interpolation='bilinear')
-        plt.colorbar(im, ax=ax, label='Eigenvector value')
-        ax.set_title('Eigen-Attention (2nd smallest eigenvector)')
-        ax.axis('off')
-        plt.tight_layout()
-        plt.savefig(out_eigvec, dpi=150)
-        plt.close(fig)
-
-        # --- Eigen-attention: overlay on original image ---
-        eigvec_norm = (eigvec - eigvec.min()) / (eigvec.max() - eigvec.min() + 1e-8)  # [0,1]
-        cmap_fn = plt.get_cmap('RdBu_r')
-        eigvec_color = (cmap_fn(eigvec_norm)[:, :, :3] * 255).astype(np.uint8)  # H x W x 3
-        overlay = (org * 0.5 + eigvec_color * 0.5).astype(np.uint8)
-        Image.fromarray(overlay).save(out_eigvec_overlay)
-
+        #plt.imsave(fname=out_eigvec, arr=eigvec, cmap='cividis')
         mask_color_compose(org, bipartition).save(out_lost)
         mask_color_compose(org, binary_solver).save(out_bfs)
 
