@@ -24,6 +24,7 @@ def ncut(feats, dims, scales, init_image_size, tau = 0, eps=1e-5, im_name='', no
     feats = F.normalize(feats, p=2, dim=0)
     A = (feats.transpose(0,1) @ feats)
     A = A.cpu().numpy()
+    A = A + 0.1*(A@A)  
     A_raw = A.copy()  # save raw cosine similarities before thresholding
     if no_binary_graph:
         A[A<tau] = eps
@@ -63,7 +64,7 @@ def ncut(feats, dims, scales, init_image_size, tau = 0, eps=1e-5, im_name='', no
     eigvec = second_smallest_vec.reshape(dims) 
     eigvec = torch.from_numpy(eigvec).to('cpu')
     eigvec = F.interpolate(eigvec.unsqueeze(0).unsqueeze(0), size=init_image_size, mode='nearest').squeeze()
-    return  seed, bipartition.cpu().numpy(), eigvec.cpu().numpy(), A_raw
+    return  seed, bipartition.cpu().numpy(), eigvec.cpu().numpy(), A
 
 def detect_box(bipartition, seed,  dims, initial_im_size=None, scales=None, principle_object=True):
     """
