@@ -73,4 +73,4 @@ python main_tokencut.py \
 
 python main_tokencut.py --dataset VOC07 --set trainval     --recursive  --ncut-threshold 0.4  --output_dir outputs_recursive_spatial  --max-segment-ratio 0.8  --affinity-method A
 
-python compare_corloc.py     --baseline-pkl  outputs_baseline/VOC07_trainval/TokenCut-vit_small16_k/preds.pkl     --recursive-pkl outputs_recursive_diffusion/VOC07_trainval/TokenCut-vit_small16_k/preds.pkl     --out-dir corloc_comparison
+python compare_corloc.py     --baseline-pkl  outputs_baseline/VOC07_trainval/TokenCut-vit_small16_k/preds.pkl     --recursive-pkl outputs_recursive_spatial/VOC07_trainval/TokenCut-vit_small16_k/preds.pkl     --out-dir corloc_comparison
