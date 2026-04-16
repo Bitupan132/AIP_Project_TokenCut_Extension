@@ -26,16 +26,16 @@ ToTensor = transforms.Compose([
                                 transforms.Normalize((0.485, 0.456, 0.406),
                                                      (0.229, 0.224, 0.225)),])
 
-def get_tokencut_binary_map(img_pth, backbone, patch_size, tau, spatial_weight=0.0, spatial_sigma=1.0) :
+def get_tokencut_binary_map(img_pth, backbone, patch_size, tau, device, method="baseline", **method_kwargs):
     I = Image.open(img_pth).convert('RGB')
     I_resize, w, h, feat_w, feat_h = utils.resize_pil(I, patch_size)
 
-    tensor = ToTensor(I_resize).unsqueeze(0).cpu()
+    tensor = ToTensor(I_resize).unsqueeze(0).to(device)
     feat = backbone(tensor)[0]
 
     seed, bipartition, eigvec, affinity = tokencut.ncut(
         feat, [feat_h, feat_w], [patch_size, patch_size], [h, w], tau,
-        spatial_weight=spatial_weight, spatial_sigma=spatial_sigma)
+        method=method, **method_kwargs)
     return bipartition, eigvec, affinity
 
 def mask_color_compose(org, mask, mask_color = [173, 216, 230]) :
@@ -67,9 +67,20 @@ parser.add_argument('--sigma-luma', type=float, default=16, help='sigma luma in 
 parser.add_argument('--sigma-chroma', type=float, default=8, help='sigma chroma in the bilateral solver')
 
 parser.add_argument('--spatial-weight', type=float, default=0.5,
-                    help='Weight (alpha) for the Gaussian spatial affinity term added to cosine similarity. 0 disables it.')
+                    help='[Method A] Weight (alpha) for the Gaussian spatial proximity kernel.')
 parser.add_argument('--spatial-sigma', type=float, default=6.0,
-                    help='Sigma (in patch units) for the spatial Gaussian: exp(-||i-j||^2 / sigma^2)')
+                    help='[Method A] Sigma (in patch units) for the spatial Gaussian: exp(-||i-j||^2 / sigma^2).')
+
+parser.add_argument('--affinity-method', type=str, default='baseline',
+                    choices=list(tokencut.AFFINITY_METHODS),
+                    help=(
+                        'Affinity matrix construction method. '
+                        "'baseline': pure cosine similarity. "
+                        "'A': + Gaussian spatial proximity (see --spatial-weight, --spatial-sigma). "
+                        "'B': + graph diffusion E'=E+gamma*E^2 (see --diffusion-gamma)."
+                    ))
+parser.add_argument('--diffusion-gamma', type=float, default=0.1,
+                    help="[Method B] Gamma for graph diffusion: E' = E + gamma * E^2.")
 
 
 parser.add_argument('--dataset', type=str, default=None, choices=['ECSSD', 'DUTS', 'DUT', None], help='which dataset?')
@@ -80,6 +91,9 @@ parser.add_argument('--img-path', type=str, default=None, help='single image vis
 
 args = parser.parse_args()
 print (args)
+
+device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+print(f"Using device: {device}")
 
 ## feature net
 
@@ -110,7 +124,7 @@ backbone = dino.ViTFeat(url, feat_dim, args.vit_arch, args.vit_feat, args.patch_
 msg = 'Load {} pre-trained feature...'.format(args.vit_arch)
 print (msg)
 backbone.eval()
-backbone.cpu()
+backbone.to(device)
 
 if args.dataset == 'ECSSD' :
     args.img_dir = '../datasets/ECSSD/img'
@@ -152,8 +166,10 @@ for img_name in tqdm(img_list) :
         img_pth = os.path.join(args.img_dir, img_name)
     
     bipartition, eigvec, affinity = get_tokencut_binary_map(
-        img_pth, backbone, args.patch_size, args.tau,
-        spatial_weight=args.spatial_weight, spatial_sigma=args.spatial_sigma)
+        img_pth, backbone, args.patch_size, args.tau, device,
+        method=args.affinity_method,
+        spatial_weight=args.spatial_weight, spatial_sigma=args.spatial_sigma,
+        gamma=args.diffusion_gamma)
     mask_lost.append(bipartition)
 
     output_solver, binary_solver = bilateral_solver.bilateral_solver_output(img_pth, bipartition, sigma_spatial = args.sigma_spatial, sigma_luma = args.sigma_luma, sigma_chroma = args.sigma_chroma)

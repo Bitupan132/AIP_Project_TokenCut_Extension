@@ -1,0 +1,76 @@
+1. single image
+
+cd unsupervised_saliency_detection 
+python get_saliency.py --sigma-spatial 16 --sigma-luma 16 --sigma-chroma 8 --vit-arch small --patch-size 16 --img-path ../datasets/VOC2007/VOCdevkit/VOC2007/JPEGImages --out-dir ./output
+
+2. Evaulation
+python main_tokencut.py --dataset VOC07 --set trainval
+
+updated:
+# Baseline — pure cosine similarity
+python main_tokencut.py --dataset VOC07 --set trainval --affinity-method baseline
+
+# Method A — spatial continuity constraint
+python main_tokencut.py --dataset VOC07 --set trainval --affinity-method A --spatial-weight 5.0 --spatial-sigma 9.0
+
+# Method B — graph diffusion
+python main_tokencut.py --dataset VOC07 --set trainval --affinity-method B --diffusion-gamma 0.1
+
+# change 2: recursive ncut
+
+# Standard single-object (unchanged)
+python main_tokencut.py --dataset VOC07 --set trainval
+
+# Iterative multi-object
+python main_tokencut.py --dataset VOC07 --set trainval --recursive
+
+# Tighter recursion (fewer, more confident boxes)
+python main_tokencut.py --dataset VOC07 --set trainval --recursive \
+    --ncut-threshold 0.15 --stability-threshold 0.04 --min-segment-size 30
+
+# change 3: multi eigen vector
+# Detect 3 objects (default)
+python main_tokencut.py --dataset VOC07 --set trainval --multi-eigenvec
+
+# Detect 5 objects, with Method A affinity
+python main_tokencut.py --dataset VOC07 --set trainval --multi-eigenvec \
+    --n-segments 5 --affinity-method A --spatial-weight 5.0
+
+# Tune k-means reliability
+python main_tokencut.py --dataset VOC07 --set trainval --multi-eigenvec \
+    --n-segments 4 --kmeans-n-init 20
+
+# k is chosen automatically (up to 6 by default)
+python main_tokencut.py --dataset VOC07 --set trainval --auto-k
+
+# Allow up to 4 objects max
+python main_tokencut.py --dataset VOC07 --set trainval --auto-k --max-k 4
+
+# Combine with Method B affinity
+python main_tokencut.py --dataset VOC07 --set trainval --auto-k \
+    --affinity-method B --diffusion-gamma 0.1
+
+
+python main_tokencut.py \
+    --image_path datasets/VOC2007/VOCdevkit/VOC2007/JPEGImages/000012.jpg \
+    --recursive \
+    --visualize all
+
+# More aggressive splitting (more boxes)
+python main_tokencut.py \
+    --image_path datasets/VOC2007/VOCdevkit/VOC2007/JPEGImages/000021.jpg \
+    --recursive \
+    --ncut-threshold 0.10 \
+    --min-segment-size 10 \
+    --visualize all
+
+# Combined with Method B affinity
+python main_tokencut.py \
+    --image_path datasets/VOC2007/VOCdevkit/VOC2007/JPEGImages/000012.jpg \
+    --recursive \
+    --affinity-method B --diffusion-gamma 0.1 \
+    --visualize all
+
+python main_tokencut.py --dataset VOC07 --set trainval     --recursive  --ncut-threshold 0.4  --output_dir outputs_recursive_spatial  --max-segment-ratio 0.8  --affinity-method A
+
+python compare_corloc.py     --baseline-pkl  outputs_baseline/VOC07_trainval/TokenCut-vit_small16_k/preds.pkl     --recursive-pkl outputs_recursive_diffusion/VOC07_trainval/TokenCut-vit_small16_k/preds.pkl     --out-dir corloc_comparison

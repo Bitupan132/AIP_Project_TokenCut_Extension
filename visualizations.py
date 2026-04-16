@@ -61,6 +61,38 @@ def visualize_predictions_gt(img, pred, gt, vis_folder, im_name, dim, scales, sa
         #print(f"Predictions saved at {pltname}.")
     return image
 
+def visualize_predictions_multi(img, preds, vis_folder, im_name, save=True):
+    """
+    Draw all predicted boxes on the image, each in a distinct colour.
+    preds: list of [x0, y0, x1, y1] arrays/lists.
+    """
+    COLORS = [
+        (255,  64,  64),   # red
+        ( 64, 255,  64),   # green
+        ( 64, 128, 255),   # blue
+        (255, 200,   0),   # yellow
+        (255,   0, 200),   # magenta
+        (  0, 220, 220),   # cyan
+    ]
+    image = np.copy(img)
+    for i, pred in enumerate(preds):
+        color = COLORS[i % len(COLORS)]
+        cv2.rectangle(
+            image,
+            (int(pred[0]), int(pred[1])),
+            (int(pred[2]), int(pred[3])),
+            color, 3,
+        )
+        cv2.putText(image, str(i + 1),
+                    (int(pred[0]) + 4, int(pred[1]) + 18),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+    if save:
+        pltname = f"{vis_folder}/{im_name}_TokenCut_pred.jpg"
+        Image.fromarray(image).save(pltname)
+        print(f"Predictions saved at {pltname}.")
+    return image
+
+
 def visualize_eigvec(eigvec, vis_folder, im_name, dim, scales, save=True):
     """
     Visualization of the second smallest eigvector

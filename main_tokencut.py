@@ -16,8 +16,8 @@ from PIL import Image
 
 from networks import get_model
 from datasets import ImageDataset, Dataset, bbox_iou
-from visualizations import visualize_img, visualize_eigvec, visualize_predictions, visualize_predictions_gt 
-from object_discovery import ncut 
+from visualizations import visualize_img, visualize_eigvec, visualize_predictions, visualize_predictions_gt, visualize_predictions_multi
+from object_discovery import ncut, ncut_recursive, ncut_multi_eigenvec, ncut_auto_k, AFFINITY_METHODS
 import matplotlib.pyplot as plt
 import time
 
@@ -110,6 +110,79 @@ if __name__ == "__main__":
     parser.add_argument("--eps", type=float, default=1e-5, help="Eps for defining the Graph.")
     parser.add_argument("--no-binary-graph", action="store_true", default=False, help="Generate a binary graph where edge of the Graph will binary. Or using similarity score as edge weight.")
 
+    # Affinity method selection
+    parser.add_argument(
+        "--affinity-method",
+        type=str,
+        default="baseline",
+        choices=list(AFFINITY_METHODS),
+        help=(
+            "Affinity matrix construction method. "
+            "'baseline': pure cosine similarity (no modification). "
+            "'A': + Gaussian spatial proximity (see --spatial-weight, --spatial-sigma). "
+            "'B': + graph diffusion E'=E+gamma*E^2 (see --diffusion-gamma)."
+        ),
+    )
+    parser.add_argument(
+        "--spatial-weight", type=float, default=5.0,
+        help="[Method A] Weight (alpha) for the Gaussian spatial proximity kernel."
+    )
+    parser.add_argument(
+        "--spatial-sigma", type=float, default=9.0,
+        help="[Method A] Sigma in patch-grid units for the spatial Gaussian kernel."
+    )
+    parser.add_argument(
+        "--diffusion-gamma", type=float, default=0.1,
+        help="[Method B] Gamma for graph diffusion: E' = E + gamma * E^2."
+    )
+
+    # Recursive / Iterative TokenCut
+    parser.add_argument(
+        "--recursive", action="store_true", default=False,
+        help="Use iterative (recursive) NCut for multi-object detection (Shi & Malik §3.2)."
+    )
+    parser.add_argument(
+        "--ncut-threshold", type=float, default=0.2,
+        help="[Recursive] Stop recursing when NCut energy >= this value (default 0.2)."
+    )
+    parser.add_argument(
+        "--stability-threshold", type=float, default=0.06,
+        help="[Recursive] Eigenvector histogram stability threshold (default 0.06)."
+    )
+    parser.add_argument(
+        "--min-segment-size", type=int, default=20,
+        help="[Recursive] Minimum number of patches to attempt a split (default 20)."
+    )
+    parser.add_argument(
+        "--max-segment-ratio", type=float, default=0.5,
+        help="[Recursive] Segments covering more than this fraction of all patches are "
+             "treated as background and get no box (default 0.5)."
+    )
+
+    # Multi-eigenvector spectral clustering
+    parser.add_argument(
+        "--multi-eigenvec", action="store_true", default=False,
+        help="Use multi-eigenvector spectral clustering for multi-object detection (Ng et al. 2002)."
+    )
+    parser.add_argument(
+        "--n-segments", type=int, default=3,
+        help="[Multi-eigenvec] Number of spectral clusters / objects to detect (default 3)."
+    )
+    parser.add_argument(
+        "--kmeans-n-init", type=int, default=10,
+        help="[Multi-eigenvec / Auto-k] Number of k-means restarts (default 10)."
+    )
+
+    # Automatic-k multi-eigenvector NCut (eigengap heuristic)
+    parser.add_argument(
+        "--auto-k", action="store_true", default=False,
+        help="Automatically determine number of objects via eigengap heuristic (Shi & Malik 2000)."
+    )
+    parser.add_argument(
+        "--max-k", type=int, default=6,
+        help="[Auto-k] Upper bound on the number of clusters to consider (default 6)."
+    )
+
     # Use dino-seg proposed method
     parser.add_argument("--dinoseg", action="store_true", help="Apply DINO-seg baseline.")
     parser.add_argument("--dinoseg_head", type=int, default=4)
@@ -191,13 +264,11 @@ if __name__ == "__main__":
             int(np.ceil(img.shape[1] / args.patch_size) * args.patch_size),
             int(np.ceil(img.shape[2] / args.patch_size) * args.patch_size),
         )
-        paded = torch.zeros(size_im)
+        # Move to device first, then pad directly on device (avoids a CPU→GPU copy)
+        img = img.to(device, non_blocking=True)
+        paded = torch.zeros(size_im, device=device)
         paded[:, : img.shape[1], : img.shape[2]] = img
         img = paded
-
-        # # Move to gpu
-        if device == torch.device('cuda'):
-            img = img.cuda(non_blocking=True)
         # Size for transformers
         w_featmap = img.shape[-2] // args.patch_size
         h_featmap = img.shape[-1] // args.patch_size
@@ -269,31 +340,82 @@ if __name__ == "__main__":
             else:
                 raise ValueError("Unknown model.")
 
-        # ------------ Apply TokenCut ------------------------------------------- 
+        # ------------ Apply TokenCut -------------------------------------------
         if not args.dinoseg:
-            pred, objects, foreground, seed , bins, eigenvector= ncut(feats, [w_featmap, h_featmap], scales, init_image_size, args.tau, args.eps, im_name=im_name, no_binary_graph=args.no_binary_graph)
-            
-            if args.visualize == "pred" and args.no_evaluation :
+            ncut_kwargs = dict(
+                tau=args.tau, eps=args.eps, im_name=im_name,
+                no_binary_graph=args.no_binary_graph,
+                method=args.affinity_method,
+                spatial_weight=args.spatial_weight,
+                spatial_sigma=args.spatial_sigma,
+                gamma=args.diffusion_gamma,
+            )
+
+            if args.recursive:
+                preds_list, masks_list, eigvecs_list = ncut_recursive(
+                    feats, [w_featmap, h_featmap], scales, init_image_size,
+                    ncut_thresh=args.ncut_threshold,
+                    stability_thresh=args.stability_threshold,
+                    min_segment_size=args.min_segment_size,
+                    max_segment_ratio=args.max_segment_ratio,
+                    **ncut_kwargs,
+                )
+                pred = preds_list[0]
+                eigenvector = eigvecs_list[0]
+            elif args.multi_eigenvec:
+                preds_list, masks_list, eigvecs_list = ncut_multi_eigenvec(
+                    feats, [w_featmap, h_featmap], scales, init_image_size,
+                    n_segments=args.n_segments,
+                    kmeans_n_init=args.kmeans_n_init,
+                    **ncut_kwargs,
+                )
+                pred = preds_list[0]
+                eigenvector = eigvecs_list[0]
+            elif args.auto_k:
+                k_found, preds_list, masks_list, eigvecs_list = ncut_auto_k(
+                    feats, [w_featmap, h_featmap], scales, init_image_size,
+                    max_k=args.max_k,
+                    kmeans_n_init=args.kmeans_n_init,
+                    **ncut_kwargs,
+                )
+                pred = preds_list[0]
+                eigenvector = eigvecs_list[0]
+            else:
+                pred, objects, foreground, seed, bins, eigenvector = ncut(
+                    feats, [w_featmap, h_featmap], scales, init_image_size,
+                    **ncut_kwargs,
+                )
+                preds_list = [pred]
+
+            if args.visualize in ("pred", "all") and args.no_evaluation:
                 image = dataset.load_image(im_name, size_im)
-                visualize_predictions(image, pred, vis_folder, im_name)
-            if args.visualize == "attn" and args.no_evaluation:
+                if len(preds_list) > 1:
+                    visualize_predictions_multi(image, preds_list, vis_folder, im_name)
+                else:
+                    visualize_predictions(image, pred, vis_folder, im_name)
+            if args.visualize in ("attn", "all") and args.no_evaluation:
                 visualize_eigvec(eigenvector, vis_folder, im_name, [w_featmap, h_featmap], scales)
-            if args.visualize == "all" and args.no_evaluation:
-                image = dataset.load_image(im_name, size_im)
-                visualize_predictions(image, pred, vis_folder, im_name)
-                visualize_eigvec(eigenvector, vis_folder, im_name, [w_featmap, h_featmap], scales)
-                        
+
         # ------------ Visualizations -------------------------------------------
-        # Save the prediction
-        preds_dict[im_name] = pred
+        # Save all boxes for multi-box modes so pkl evaluation matches live corloc
+        if not args.dinoseg and (args.recursive or args.multi_eigenvec or args.auto_k):
+            preds_dict[im_name] = preds_list
+        else:
+            preds_dict[im_name] = pred
 
         # Evaluation
         if args.no_evaluation:
             continue
 
-        # Compare prediction to GT boxes
-        ious = bbox_iou(torch.from_numpy(pred), torch.from_numpy(gt_bbxs))
-        
+        # Compare prediction to GT boxes — multi-box modes check all predictions
+        if (args.recursive or args.multi_eigenvec or args.auto_k) and not args.dinoseg:
+            ious = torch.cat([
+                bbox_iou(torch.from_numpy(p), torch.from_numpy(gt_bbxs))
+                for p in preds_list
+            ])
+        else:
+            ious = bbox_iou(torch.from_numpy(pred), torch.from_numpy(gt_bbxs))
+
         if torch.any(ious >= 0.5):
             corloc[im_id] = 1
         vis_folder = f"{args.output_dir}/{exp_name}"
