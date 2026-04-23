@@ -158,6 +158,12 @@ if __name__ == "__main__":
         help="[Recursive] Segments covering more than this fraction of all patches are "
              "treated as background and get no box (default 0.5)."
     )
+    parser.add_argument(
+        "--min-box-area-ratio", type=float, default=0.0,
+        help="[Recursive] Discard predicted boxes whose pixel area is smaller than "
+             "this fraction of the image area (default 0.0 = keep all). "
+             "E.g. 0.02 removes boxes covering less than 2%% of the image."
+    )
 
     # Multi-eigenvector spectral clustering
     parser.add_argument(
@@ -358,6 +364,7 @@ if __name__ == "__main__":
                     stability_thresh=args.stability_threshold,
                     min_segment_size=args.min_segment_size,
                     max_segment_ratio=args.max_segment_ratio,
+                    min_box_area_ratio=args.min_box_area_ratio,
                     **ncut_kwargs,
                 )
                 pred = preds_list[0]

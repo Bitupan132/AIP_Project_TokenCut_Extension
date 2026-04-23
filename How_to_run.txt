@@ -71,6 +71,43 @@ python main_tokencut.py \
     --affinity-method B --diffusion-gamma 0.1 \
     --visualize all
 
-python main_tokencut.py --dataset VOC07 --set trainval     --recursive  --ncut-threshold 0.4  --output_dir outputs_recursive_spatial  --max-segment-ratio 0.8  --affinity-method A
+# spatial + recursive -> 70.8
+python main_tokencut.py \
+    --dataset VOC07 --set trainval \
+    --recursive \
+    --ncut-threshold 0.4 \
+    --max-segment-ratio 0.8 \
+    --affinity-method A \
+    --spatial-weight 0.3 \
+    --spatial-sigma 5.0 \
+    --output_dir outputs_recursive_A_tuned
 
-python compare_corloc.py     --baseline-pkl  outputs_baseline/VOC07_trainval/TokenCut-vit_small16_k/preds.pkl     --recursive-pkl outputs_recursive_spatial/VOC07_trainval/TokenCut-vit_small16_k/preds.pkl     --out-dir corloc_comparison
+python compare_corloc.py \
+    --baseline-pkl  outputs_baseline/VOC07_trainval/TokenCut-vit_small16_k/preds.pkl \
+    --recursive-pkl outputs_recursive_spatial_minbox/VOC07_trainval/TokenCut-vit_small16_k/preds.pkl \
+    --out-dir corloc_comparison_rec_spa_min
+
+# Diffusion + Recursive with minimum box area argument ->
+python main_tokencut.py \
+    --dataset VOC07 --set trainval \
+    --recursive \
+    --ncut-threshold 0.4 \
+    --max-segment-ratio 0.8 \
+    --min-box-area-ratio 0.02 \
+    --affinity-method B \
+    --output_dir outputs_recursive_B
+
+# spatial + recursive + minimum box area -> 
+python main_tokencut.py \
+    --dataset VOC07 --set trainval \
+    --recursive \
+    --ncut-threshold 0.4 \
+    --max-segment-ratio 0.8 \
+    --min-box-area-ratio 0.02 \
+    --affinity-method A \
+    --spatial-weight 0.3 \
+    --spatial-sigma 5.0 \
+    --output_dir outputs_recursive_spatial_minbox
+
+
+

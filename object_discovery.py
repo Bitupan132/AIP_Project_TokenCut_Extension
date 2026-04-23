@@ -394,13 +394,18 @@ def _bipartition_subgraph(A_sub_np, device, n_thresholds=50):
     return bipartition, ncut_val, v
 
 
-def _add_leaf_box(node_indices, eigvec_vals, dims, scales, init_image_size_hw, results):
+def _add_leaf_box(node_indices, eigvec_vals, dims, scales, init_image_size_hw,
+                  results, min_box_area_ratio=0.0):
     """Build a bounding box for every connected component in a leaf segment.
 
     Previously only the principal (seed) connected component received a box.
     Now ALL connected components are boxed so that spatially separated objects
     that end up in the same leaf (e.g. two persons standing apart) each get
     their own bounding box.
+
+    Args:
+        min_box_area_ratio: discard any box whose pixel area is smaller than
+            this fraction of the total image area (default 0.0 = keep all).
     """
     feat_h, feat_w = dims
     mask_2d = np.zeros((feat_h, feat_w), dtype=float)
@@ -410,6 +415,12 @@ def _add_leaf_box(node_indices, eigvec_vals, dims, scales, init_image_size_hw, r
 
     eigvec_2d = np.zeros((feat_h, feat_w), dtype=np.float32)
     eigvec_2d[rows, cols] = eigvec_vals
+
+    # Total image area for ratio filtering
+    if init_image_size_hw:
+        image_area = init_image_size_hw[0] * init_image_size_hw[1]
+    else:
+        image_area = None
 
     # Find every connected component in this leaf's mask
     labeled, num_components = ndimage.label(mask_2d)
@@ -436,6 +447,12 @@ def _add_leaf_box(node_indices, eigvec_vals, dims, scales, init_image_size_hw, r
             pred[2] = min(pred[2], init_image_size_hw[1])
             pred[3] = min(pred[3], init_image_size_hw[0])
 
+        # Drop boxes that are too small relative to the image
+        if min_box_area_ratio > 0.0 and image_area:
+            box_area = (pred[2] - pred[0]) * (pred[3] - pred[1])
+            if box_area / image_area < min_box_area_ratio:
+                continue
+
         # Use per-component mask so each result entry is self-consistent
         comp_mask_2d = (labeled == comp_id).astype(float)
         results.append((np.asarray(pred), comp_mask_2d, eigvec_2d))
@@ -444,13 +461,16 @@ def _add_leaf_box(node_indices, eigvec_vals, dims, scales, init_image_size_hw, r
 def _recursive_ncut_helper(A_full_np, node_indices, dims, scales,
                             init_image_size_hw, device,
                             ncut_thresh, stability_thresh, min_segment_size,
-                            total_N, max_segment_ratio, n_thresholds, results):
+                            total_N, max_segment_ratio, n_thresholds,
+                            min_box_area_ratio, results):
     """
     Recursive worker for iterative NCut.
 
     Boxes are added ONLY at leaf nodes (segments that cannot be split further).
     Segments covering more than max_segment_ratio of all patches are silently
     dropped — they correspond to whole-image background boxes.
+    Boxes whose pixel area is smaller than min_box_area_ratio of the image
+    area are also dropped.
     """
     n = len(node_indices)
     if n < min_segment_size:
@@ -465,7 +485,8 @@ def _recursive_ncut_helper(A_full_np, node_indices, dims, scales,
     if out is None:
         if not is_background:
             _add_leaf_box(node_indices, np.ones(n, dtype=np.float32),
-                          dims, scales, init_image_size_hw, results)
+                          dims, scales, init_image_size_hw, results,
+                          min_box_area_ratio=min_box_area_ratio)
         return
 
     bipartition_local, ncut_val, eigvec_local = out
@@ -475,7 +496,8 @@ def _recursive_ncut_helper(A_full_np, node_indices, dims, scales,
             not _is_eigenvec_stable(eigvec_local, stability_thresh=stability_thresh)):
         if not is_background:
             _add_leaf_box(node_indices, eigvec_local,
-                          dims, scales, init_image_size_hw, results)
+                          dims, scales, init_image_size_hw, results,
+                          min_box_area_ratio=min_box_area_ratio)
         return
 
     # Valid split — recurse on both halves, no box at this level
@@ -486,7 +508,8 @@ def _recursive_ncut_helper(A_full_np, node_indices, dims, scales,
         _recursive_ncut_helper(A_full_np, idx_half, dims, scales,
                                init_image_size_hw, device,
                                ncut_thresh, stability_thresh, min_segment_size,
-                               total_N, max_segment_ratio, n_thresholds, results)
+                               total_N, max_segment_ratio, n_thresholds,
+                               min_box_area_ratio, results)
 
 
 def ncut_recursive(feats, dims, scales, init_image_size, tau=0, eps=1e-5,
@@ -494,6 +517,7 @@ def ncut_recursive(feats, dims, scales, init_image_size, tau=0, eps=1e-5,
                    method="baseline",
                    ncut_thresh=0.2, stability_thresh=0.06,
                    min_segment_size=20, max_segment_ratio=0.5,
+                   min_box_area_ratio=0.0,
                    n_thresholds=50,
                    **method_kwargs):
     """
@@ -514,6 +538,11 @@ def ncut_recursive(feats, dims, scales, init_image_size, tau=0, eps=1e-5,
         ncut_thresh:        Maximum NCut energy to continue recursion (default 0.2).
         stability_thresh:   Eigenvector histogram stability threshold (default 0.06).
         min_segment_size:   Minimum number of patches to attempt a split (default 20).
+        max_segment_ratio:  Leaf segments covering more than this fraction of all
+                            patches are treated as background (default 0.5).
+        min_box_area_ratio: Discard predicted boxes whose pixel area is smaller
+                            than this fraction of the image area (default 0.0).
+                            E.g. 0.02 removes boxes covering < 2% of the image.
         n_thresholds:       Threshold sweep resolution (default 50).
         **method_kwargs:    Hyperparameters forwarded to the affinity method.
 
@@ -553,7 +582,7 @@ def ncut_recursive(feats, dims, scales, init_image_size, tau=0, eps=1e-5,
         A_np, all_indices, dims, scales, init_image_size_hw, device,
         ncut_thresh, stability_thresh, min_segment_size,
         N, max_segment_ratio, n_thresholds,
-        results
+        min_box_area_ratio, results
     )
 
     if not results:
