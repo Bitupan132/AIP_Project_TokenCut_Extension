@@ -56,36 +56,31 @@ python main_tokencut.py \
     --recursive \
     --visualize all
 
-# More aggressive splitting (more boxes)
-python main_tokencut.py \
-    --image_path datasets/VOC2007/VOCdevkit/VOC2007/JPEGImages/000021.jpg \
-    --recursive \
-    --ncut-threshold 0.10 \
-    --min-segment-size 10 \
-    --visualize all
 
-# Combined with Method B affinity: Diffusion
+# Method A — Spatial Gaussian kernel
 python main_tokencut.py \
-    --image_path datasets/VOC2007/VOCdevkit/VOC2007/JPEGImages/000012.jpg \
-    --recursive \
-    --affinity-method B --diffusion-gamma 0.1 \
-    --visualize all
+    --dataset VOC07 --set trainval \
+    --affinity-method A \
+    --spatial-weight 0.3 \
+    --spatial-sigma 5.0 \
+    --output_dir outputs_spatial
 
-# spatial + recursive -> 70.8
+# Method B — Graph diffusion
+python main_tokencut.py \
+    --dataset VOC07 --set trainval \
+    --affinity-method B \
+    --output_dir outputs_diffusion
+
+
+# Recursive with minimum box area argument ->
 python main_tokencut.py \
     --dataset VOC07 --set trainval \
     --recursive \
     --ncut-threshold 0.4 \
     --max-segment-ratio 0.8 \
-    --affinity-method A \
-    --spatial-weight 0.3 \
-    --spatial-sigma 5.0 \
-    --output_dir outputs_recursive_A_tuned
+    --min-box-area-ratio 0.02 \
+    --output_dir outputs_recursive_minbox
 
-python compare_corloc.py \
-    --baseline-pkl  outputs_baseline_avg/VOC07_trainval/TokenCut-vit_small16_k/preds.pkl \
-    --recursive-pkl outputs_recursive_spatial_minbox/VOC07_trainval/TokenCut-vit_small16_k/preds.pkl \
-    --out-dir comparison_avg_recursive_spatial_minbox
 
 # Diffusion + Recursive with minimum box area argument ->
 python main_tokencut.py \
@@ -97,14 +92,6 @@ python main_tokencut.py \
     --affinity-method B \
     --output_dir outputs_recursive_diffusion_minbox
 
-# Recursive with minimum box area argument ->
-python main_tokencut.py \
-    --dataset VOC07 --set trainval \
-    --recursive \
-    --ncut-threshold 0.4 \
-    --max-segment-ratio 0.8 \
-    --min-box-area-ratio 0.02 \
-    --output_dir outputs_recursive_minbox
 
 # spatial + recursive + minimum box area -> 
 python main_tokencut.py \
@@ -119,14 +106,7 @@ python main_tokencut.py \
     --output_dir outputs_recursive_spatial_minbox
 
 
-
-# spatial + recursive + minimum box area + weighted features
-python main_tokencut.py \
-    --dataset VOC07 --set trainval \
-    --recursive --ncut-threshold 0.4 \
-    --max-segment-ratio 0.8 \
-    --min-box-area-ratio 0.02 \
-    --affinity-method A --spatial-weight 0.3 --spatial-sigma 5.0 \
-    --multi-layer --n-layers 3 --layer-weights "0.6,0.3,0.1" \
-    --output_dir outputs_recursive_spatial_minbox_weighted
-
+python compare_corloc.py \
+    --baseline-pkl  outputs_baseline_avg/VOC07_trainval/TokenCut-vit_small16_k/preds.pkl \
+    --recursive-pkl outputs_diffusion/VOC07_trainval/TokenCut-vit_small16_k/preds.pkl \
+    --out-dir comparison_avg_diffusion
