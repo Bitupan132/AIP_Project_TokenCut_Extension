@@ -57,9 +57,12 @@ python main_tokencut.py \
     --visualize all
 
 
+python main_tokencut.py --dataset VOC12 --set trainval --output_dir outputs_baseline_avg
+
+
 # Method A — Spatial Gaussian kernel
 python main_tokencut.py \
-    --dataset VOC07 --set trainval \
+    --dataset VOC12 --set trainval \
     --affinity-method A \
     --spatial-weight 0.3 \
     --spatial-sigma 5.0 \
@@ -67,14 +70,15 @@ python main_tokencut.py \
 
 # Method B — Graph diffusion
 python main_tokencut.py \
-    --dataset VOC07 --set trainval \
+    --dataset VOC12 --set trainval \
     --affinity-method B \
+    --diffusion-gamma 0.1 \
     --output_dir outputs_diffusion
 
 
 # Recursive with minimum box area argument ->
 python main_tokencut.py \
-    --dataset VOC07 --set trainval \
+    --dataset VOC12 --set trainval \
     --recursive \
     --ncut-threshold 0.4 \
     --max-segment-ratio 0.8 \
@@ -84,7 +88,7 @@ python main_tokencut.py \
 
 # Diffusion + Recursive with minimum box area argument ->
 python main_tokencut.py \
-    --dataset VOC07 --set trainval \
+    --dataset VOC12 --set trainval \
     --recursive \
     --ncut-threshold 0.4 \
     --max-segment-ratio 0.8 \
@@ -95,7 +99,7 @@ python main_tokencut.py \
 
 # spatial + recursive + minimum box area -> 
 python main_tokencut.py \
-    --dataset VOC07 --set trainval \
+    --dataset VOC12 --set trainval \
     --recursive \
     --ncut-threshold 0.4 \
     --max-segment-ratio 0.8 \
@@ -107,6 +111,22 @@ python main_tokencut.py \
 
 
 python compare_corloc.py \
-    --baseline-pkl  outputs_baseline_avg/VOC07_trainval/TokenCut-vit_small16_k/preds.pkl \
-    --recursive-pkl outputs_diffusion/VOC07_trainval/TokenCut-vit_small16_k/preds.pkl \
-    --out-dir comparison_avg_diffusion
+    --baseline-pkl outputs_baseline_avg/VOC12_trainval/TokenCut-vit_small16_k/preds.pkl \
+    --recursive-pkl outputs_recursive_spatial_minbox/VOC12_trainval/TokenCut-vit_small16_k/preds.pkl \
+    --out-dir VOC12/comparison_avg_recursive_spatial_minbox
+
+python compare_corloc.py \
+    --baseline-pkl outputs_baseline_avg/VOC12_trainval/TokenCut-vit_small16_k/preds.pkl \
+    --recursive-pkl outputs_recursive_diffusion_minbox/VOC12_trainval/TokenCut-vit_small16_k/preds.pkl \
+    --dataset VOC12 \
+    --set trainval \
+    --out-dir VOC12/comparison_avg_recursive_diffusion_minbox
+
+
+
+python main_tokencut.py \
+    --image_path datasets/VOC2007/VOCdevkit/VOC2007/JPEGImages/000112.jpg \
+    --affinity-method A \
+    --spatial-weight 0.2 \
+    --spatial-sigma 5.0 \
+    --visualize all
