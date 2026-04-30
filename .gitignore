@@ -1,9 +1,17 @@
 /datasets/*/VOCdevkit
+/datasets/DUTS_Test/gt/
+/datasets/DUTS_Test/img/
+/datasets/DUT_OMRON/gt/
+/datasets/DUT_OMRON/img/
+/datasets/ECSSD/gt/
+/datasets/ECSSD/img/
+
 /dino/*/
 /unsupervised_saliency_detection/__pycache__
 /__pycache__
 .DS_Store
 /aip_project_env
+
 dino_deitsmall16_linearweights.pth
 dino_deitsmall8_linearweights.pth
 dino_vitbase16_linearweights.pth

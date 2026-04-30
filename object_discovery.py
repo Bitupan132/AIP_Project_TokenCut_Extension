@@ -196,14 +196,12 @@ def _apply_affinity_method_B(A, dims, gamma=0.1, **kwargs):
 
 # ---------------------------------------------------------------------------
 # Registry — add new methods here to make them available via --affinity-method.
-# Keys become the valid argument values.  Uncomment / extend for methods C, D.
+# Keys become the valid argument values.
 # ---------------------------------------------------------------------------
 AFFINITY_METHODS = {
     "baseline": _apply_affinity_baseline,
     "A":        _apply_affinity_method_A,
     "B":        _apply_affinity_method_B,
-    # "C": _apply_affinity_method_C,
-    # "D": _apply_affinity_method_D,
 }
 
 

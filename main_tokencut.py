@@ -117,10 +117,11 @@ if __name__ == "__main__":
         default="baseline",
         choices=list(AFFINITY_METHODS),
         help=(
-            "Affinity matrix construction method. "
+            "Affinity matrix construction method applied after features are computed. "
             "'baseline': pure cosine similarity (no modification). "
             "'A': + Gaussian spatial proximity (see --spatial-weight, --spatial-sigma). "
-            "'B': + graph diffusion E'=E+gamma*E^2 (see --diffusion-gamma)."
+            "'B': + graph diffusion E'=E+gamma*E^2 (see --diffusion-gamma). "
+            "Can be combined freely with --multi-layer."
         ),
     )
     parser.add_argument(
@@ -134,6 +135,24 @@ if __name__ == "__main__":
     parser.add_argument(
         "--diffusion-gamma", type=float, default=0.1,
         help="[Method B] Gamma for graph diffusion: E' = E + gamma * E^2."
+    )
+
+    # Multi-layer feature aggregation (independent of --affinity-method)
+    parser.add_argument(
+        "--multi-layer", action="store_true", default=False,
+        help="Aggregate the last --n-layers ViT block outputs as a weighted sum "
+             "before computing the affinity matrix. Can be combined with any "
+             "--affinity-method (e.g. --multi-layer --affinity-method A)."
+    )
+    parser.add_argument(
+        "--n-layers", type=int, default=3,
+        help="[--multi-layer] Number of last ViT blocks to aggregate (default 3)."
+    )
+    parser.add_argument(
+        "--layer-weights", type=str, default=None,
+        help="[--multi-layer] Comma-separated weights ordered from LAST block to OLDEST. "
+             "E.g. '0.6,0.3,0.1' gives the final block weight 0.6, the second-to-last "
+             "0.3, etc. Default: equal weights across all --n-layers blocks."
     )
 
     # Recursive / Iterative TokenCut
@@ -294,54 +313,86 @@ if __name__ == "__main__":
 
             # ------------ FORWARD PASS -------------------------------------------
             if "vit"  in args.arch:
-                # Store the outputs of qkv layer from the last attention layer
-                feat_out = {}
-                def hook_fn_forward_qkv(module, input, output):
-                    feat_out["qkv"] = output
-                model._modules["blocks"][-1]._modules["attn"]._modules["qkv"].register_forward_hook(hook_fn_forward_qkv)
-
-                # Forward pass in the model
-                attentions = model.get_last_selfattention(img[None, :, :, :])
-
-                # Scaling factor
                 scales = [args.patch_size, args.patch_size]
 
-                # Dimensions
-                nb_im = attentions.shape[0]  # Batch size
-                nh = attentions.shape[1]  # Number of heads
-                nb_tokens = attentions.shape[2]  # Number of tokens
-
-                # Baseline: compute DINO segmentation technique proposed in the DINO paper
-                # and select the biggest component
-                if args.dinoseg:
-                    pred = dino_seg(attentions, (w_featmap, h_featmap), args.patch_size, head=args.dinoseg_head)
-                    pred = np.asarray(pred)
-                else:
-                    # Extract the qkv features of the last attention layer
-                    qkv = (
-                        feat_out["qkv"]
-                        .reshape(nb_im, nb_tokens, 3, nh, -1 // nh)
-                        .permute(2, 0, 3, 1, 4)
+                if not args.dinoseg and args.multi_layer:
+                    # ----------------------------------------------------------
+                    # Multi-layer aggregation: weighted sum of the last n_layers
+                    # block outputs.  Uses get_intermediate_layers() — no QKV
+                    # hook needed.  The resulting feats tensor has the same shape
+                    # as K/Q/V features (1, N_tokens+1, embed_dim) so the rest
+                    # of the pipeline is unchanged.
+                    # Can be combined with any --affinity-method.
+                    # ----------------------------------------------------------
+                    intermediate = model.get_intermediate_layers(
+                        img[None, :, :, :], n=args.n_layers
                     )
-                    q, k, v = qkv[0], qkv[1], qkv[2]
-                    k = k.transpose(1, 2).reshape(nb_im, nb_tokens, -1)
-                    q = q.transpose(1, 2).reshape(nb_im, nb_tokens, -1)
-                    v = v.transpose(1, 2).reshape(nb_im, nb_tokens, -1)
+                    # intermediate[0] = oldest block, intermediate[-1] = last block
 
-                    # Modality selection
-                    if args.which_features == "k":
-                        #feats = k[:, 1:, :]
-                        feats = k
-                    elif args.which_features == "q":
-                        #feats = q[:, 1:, :]
-                        feats = q
-                    elif args.which_features == "v":
-                        #feats = v[:, 1:, :]
-                        feats = v
-                        
-                    if args.save_feat_dir is not None : 
-                        np.save(os.path.join(args.save_feat_dir, im_name.replace('.jpg', '.npy').replace('.jpeg', '.npy').replace('.png', '.npy')), feats.cpu().numpy())
-                        continue
+                    # Parse weights (user gives newest→oldest order)
+                    if args.layer_weights is not None:
+                        raw = [float(w) for w in args.layer_weights.split(',')]
+                        if len(raw) != args.n_layers:
+                            raise ValueError(
+                                f"--layer-weights has {len(raw)} values but "
+                                f"--n-layers={args.n_layers}."
+                            )
+                        # reverse so index 0 = oldest block (matches intermediate order)
+                        raw = raw[::-1]
+                        wt = torch.tensor(raw, dtype=intermediate[0].dtype,
+                                          device=intermediate[0].device)
+                        wt = wt / wt.sum()   # normalise to sum=1
+                    else:
+                        wt = torch.ones(args.n_layers,
+                                        dtype=intermediate[0].dtype,
+                                        device=intermediate[0].device) / args.n_layers
+
+                    # Weighted sum → (1, N_tokens+1, embed_dim)
+                    feats = sum(w.item() * f for w, f in zip(wt, intermediate))
+
+                else:
+                    # Standard path: QKV hook on the last attention block
+                    feat_out = {}
+                    def hook_fn_forward_qkv(module, input, output):
+                        feat_out["qkv"] = output
+                    model._modules["blocks"][-1]._modules["attn"]._modules["qkv"].register_forward_hook(hook_fn_forward_qkv)
+
+                    # Forward pass in the model
+                    attentions = model.get_last_selfattention(img[None, :, :, :])
+
+                    # Dimensions
+                    nb_im = attentions.shape[0]  # Batch size
+                    nh = attentions.shape[1]  # Number of heads
+                    nb_tokens = attentions.shape[2]  # Number of tokens
+
+                    # Baseline: compute DINO segmentation technique proposed in the DINO paper
+                    # and select the biggest component
+                    if args.dinoseg:
+                        pred = dino_seg(attentions, (w_featmap, h_featmap), args.patch_size, head=args.dinoseg_head)
+                        pred = np.asarray(pred)
+                    else:
+                        # Extract the qkv features of the last attention layer
+                        qkv = (
+                            feat_out["qkv"]
+                            .reshape(nb_im, nb_tokens, 3, nh, -1 // nh)
+                            .permute(2, 0, 3, 1, 4)
+                        )
+                        q, k, v = qkv[0], qkv[1], qkv[2]
+                        k = k.transpose(1, 2).reshape(nb_im, nb_tokens, -1)
+                        q = q.transpose(1, 2).reshape(nb_im, nb_tokens, -1)
+                        v = v.transpose(1, 2).reshape(nb_im, nb_tokens, -1)
+
+                        # Modality selection
+                        if args.which_features == "k":
+                            feats = k
+                        elif args.which_features == "q":
+                            feats = q
+                        elif args.which_features == "v":
+                            feats = v
+
+                        if args.save_feat_dir is not None:
+                            np.save(os.path.join(args.save_feat_dir, im_name.replace('.jpg', '.npy').replace('.jpeg', '.npy').replace('.png', '.npy')), feats.cpu().numpy())
+                            continue
 
             else:
                 raise ValueError("Unknown model.")
