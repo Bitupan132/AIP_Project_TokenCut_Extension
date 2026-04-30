@@ -123,10 +123,67 @@ python compare_corloc.py \
     --out-dir VOC12/comparison_avg_recursive_diffusion_minbox
 
 
-
 python main_tokencut.py \
     --image_path datasets/VOC2007/VOCdevkit/VOC2007/JPEGImages/000112.jpg \
     --affinity-method A \
     --spatial-weight 0.2 \
     --spatial-sigma 5.0 \
     --visualize all
+
+python main_tokencut.py \
+    --image_path datasets/VOC2012/VOCdevkit/VOC2012/JPEGImages/2008_000215.jpg \
+    --recursive \
+    --ncut-threshold 0.4 \
+    --max-segment-ratio 0.8 \
+    --min-box-area-ratio 0.02 \
+    --visualize all
+
+
+
+
+# -------------- Saliency Detection ----------------
+
+cd unsupervised_saliency_detection
+
+# Baseline
+python get_saliency.py --out-dir ../outputs_saliency_detection/ECSSD_baseline --dataset ECSSD --vit-arch small --patch-size 16 --nb-vis 200
+
+
+# Spatial (Method A)
+python get_saliency.py \
+    --out-dir ../outputs_saliency_detection/ECSSD_spatial \
+    --dataset ECSSD \
+    --vit-arch small --patch-size 16 \
+    --affinity-method A --spatial-weight 0.2 --nb-vis 200
+
+# Graph diffusion (Method B)
+python get_saliency.py \
+    --out-dir ../outputs_saliency_detection/ECSSD_diffusion \
+    --dataset ECSSD \
+    --vit-arch small --patch-size 16 \
+    --affinity-method B --diffusion-gamma 0.1 --nb-vis 200
+
+# Recursive
+python get_saliency.py \
+    --out-dir ../outputs_saliency_detection/ECSSD_recursive \
+    --dataset ECSSD \
+    --vit-arch small --patch-size 16 \
+    --recursive --ncut-threshold 0.4 --max-segment-ratio 0.8 --nb-vis 200
+
+# Recursive + diffusion
+python get_saliency.py \
+    --out-dir ../outputs_saliency_detection/ECSSD_recursive_diffusion \
+    --dataset ECSSD \
+    --vit-arch small --patch-size 16 \
+    --recursive --ncut-threshold 0.4 --max-segment-ratio 0.8 \
+    --affinity-method B --diffusion-gamma 0.1 --nb-vis 200
+
+# Recursive + spatial
+python get_saliency.py \
+    --out-dir ../outputs_saliency_detection/ECSSD_recursive_spatial \
+    --dataset ECSSD \
+    --vit-arch small --patch-size 16 \
+    --recursive --ncut-threshold 0.4 --max-segment-ratio 0.8
+    --affinity-method A --spatial-weight 0.3 --nb-vis 200
+
+
