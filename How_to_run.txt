@@ -137,7 +137,7 @@ python main_tokencut.py \
     --min-box-area-ratio 0.02 \
     --visualize all
 
-
+python main_tokencut.py --image_path datasets/VOC2007/VOCdevkit/VOC2007/JPEGImages/000112.jpg --visualize all 
 
 
 # -------------- Saliency Detection ----------------
