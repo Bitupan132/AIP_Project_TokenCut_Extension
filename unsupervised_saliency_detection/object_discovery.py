@@ -211,83 +211,64 @@ def ncut(feats, dims, scales, init_image_size, tau=0, eps=1e-5,
          im_name='', no_binary_graph=False,
          method="baseline", **method_kwargs):
     """
-    Implementation of NCut Method.
-    Inputs
-      feats: the pixel/patche features of an image
-      dims: dimension of the map from which the features are used
-      scales: from image to map scale
-      init_image_size: size of the image
-      tau: thresold for graph construction
-      eps: graph edge weight
-      im_name: image_name
-      no_binary_graph: ablation study for using similarity score as graph edge weight
-      method: affinity construction method — one of AFFINITY_METHODS keys:
-              "baseline" : pure cosine similarity (no modification)
-              "A"        : + Gaussian spatial proximity  (kwargs: spatial_weight, spatial_sigma)
-              "B"        : + graph diffusion E'=E+gamma*E^2  (kwargs: gamma)
-      **method_kwargs: hyperparameters forwarded to the chosen method function
+    NCut for saliency detection.
+
+    Args:
+        feats: patch features from ViTFeat — shape (D, N), CLS already stripped.
+               D = feature dimension, N = feat_h * feat_w patch count.
+        dims:  [feat_h, feat_w]
+        scales, init_image_size: unused (kept for API compatibility)
+        tau, eps:  graph construction thresholds
+        method:    affinity method key (see AFFINITY_METHODS)
+        **method_kwargs: forwarded to the affinity method
+
+    Returns:
+        seed        — int, index of the foreground seed patch
+        bipartition — (feat_h, feat_w) float array, 1=foreground 0=background
+        eigvec      — (feat_h, feat_w) float array, second smallest eigenvector
+        affinity    — (N, N) numpy array, the thresholded affinity matrix
     """
-    # Strip batch dim and CLS token; keep on device
-    feats = feats[0, 1:, :]          # (N, D) — remove batch dim and CLS token
-    feats = feats.transpose(0, 1)    # (D, N)
     device = feats.device
 
-    feats = F.normalize(feats, p=2, dim=0)      # L2-normalise each patch column
-    A = feats.transpose(0, 1) @ feats           # (N, N) cosine similarity, on device
+    # feats: (D, N) — already column-normalised to unit length by ViTFeat
+    feats = F.normalize(feats, p=2, dim=0)      # L2-normalise each column
+    A = feats.transpose(0, 1) @ feats           # (N, N) cosine similarity
 
-    # Apply chosen affinity method (operates on device tensor)
     if method not in AFFINITY_METHODS:
         raise ValueError(f"Unknown affinity method '{method}'. Choose from: {list(AFFINITY_METHODS)}")
     A = AFFINITY_METHODS[method](A, dims, **method_kwargs)
 
-    # Graph construction on device
     if no_binary_graph:
         A = torch.where(A < tau, torch.tensor(eps, device=device, dtype=A.dtype), A)
     else:
         A = (A > tau).to(A.dtype)
         A = torch.where(A == 0, torch.tensor(eps, device=device, dtype=A.dtype), A)
 
-    d_i = A.sum(dim=1)   # degree vector (N,)
+    d_i = A.sum(dim=1)
 
-    # Normalised Laplacian eigendecomposition on device via torch.linalg.eigh.
-    # The generalised problem (D-A)v = λDv is transformed to the standard
-    # symmetric form L_sym u = λu  where  L_sym = I - D^{-1/2} A D^{-1/2},
-    # and eigenvectors are recovered via v = D^{-1/2} u.
     D_inv_sqrt = torch.diag(1.0 / d_i.sqrt())
     A_sym = D_inv_sqrt @ A @ D_inv_sqrt
     L_sym = torch.eye(A_sym.shape[0], device=device, dtype=A_sym.dtype) - A_sym
-    L_sym = (L_sym + L_sym.T) * 0.5             # enforce symmetry for numerical stability
-    _, U = torch.linalg.eigh(L_sym)             # eigenvalues returned in ascending order
-    V = D_inv_sqrt @ U[:, 1:3]                  # 2nd & 3rd smallest, back-transformed
+    L_sym = (L_sym + L_sym.T) * 0.5
+    _, U = torch.linalg.eigh(L_sym)
+    eigvec = (D_inv_sqrt @ U[:, 1]).cpu().numpy()   # 2nd smallest eigenvector
 
-    # Transfer to CPU numpy — required for threshold sweep and ndimage.label
-    A_np               = A.cpu().numpy()
-    d_i_np             = d_i.cpu().numpy()
-    eigenvec_np        = V[:, 0].cpu().numpy()
-    second_smallest_np = V[:, 0].cpu().numpy()
+    A_np = A.cpu().numpy()
 
-    # ---- Bipartition via NCut energy minimisation ----
-    # best_t = find_best_ncut_threshold(second_smallest_np, A_np, d_i_np, n_thresholds=50)
-    # bipartition = second_smallest_np >= best_t
-    # # old — mean threshold
-    avg = np.sum(second_smallest_np) / len(second_smallest_np)
-    bipartition = second_smallest_np > avg
+    avg = eigvec.mean()
+    bipartition = eigvec > avg
 
-    seed = np.argmax(np.abs(second_smallest_np))
+    seed = int(np.argmax(np.abs(eigvec)))
 
-    if bipartition[seed] != 1:
-        eigenvec_np = eigenvec_np * -1
-        bipartition = np.logical_not(bipartition)
-    bipartition = bipartition.reshape(dims).astype(float)
+    if not bipartition[seed]:
+        eigvec = eigvec * -1
+        bipartition = ~bipartition
 
-    # predict BBox (single principal CC containing the seed)
-    pred, _, objects, cc = detect_box(bipartition, seed, dims, scales=scales, initial_im_size=init_image_size[1:])
-    mask = np.zeros(dims)
-    mask[cc[0], cc[1]] = 1
+    feat_h, feat_w = dims
+    bipartition_2d = bipartition.reshape(feat_h, feat_w).astype(float)
+    eigvec_2d      = eigvec.reshape(feat_h, feat_w)
 
-    # Return signature matches main_tokencut.py:
-    # pred, objects, foreground, seed, bins, eigenvector
-    return np.asarray(pred), objects, mask, seed, None, eigenvec_np.reshape(dims)
+    return seed, bipartition_2d, eigvec_2d, A_np
 
 def detect_box(bipartition, seed,  dims, initial_im_size=None, scales=None, principle_object=True):
     """
@@ -545,6 +526,139 @@ def ncut_recursive(feats, dims, scales, init_image_size, tau=0, eps=1e-5,
 
     preds, masks, eigvecs = zip(*results)
     return list(preds), list(masks), list(eigvecs)
+
+
+# ---------------------------------------------------------------------------
+# Recursive NCut for saliency detection
+# ---------------------------------------------------------------------------
+
+def _collect_leaf_indices_saliency(A_full_np, node_indices, device,
+                                    ncut_thresh, stability_thresh, min_segment_size,
+                                    total_N, max_segment_ratio, n_thresholds,
+                                    foreground_indices):
+    """
+    Recursive worker that collects patch indices belonging to foreground
+    leaf segments.  Background leaves (covering > max_segment_ratio of all
+    patches) are silently discarded.  The collected indices are later merged
+    into a single binary saliency mask.
+    """
+    n = len(node_indices)
+    if n < min_segment_size:
+        return
+
+    is_background = (n / total_N) > max_segment_ratio
+
+    A_sub_np = A_full_np[np.ix_(node_indices, node_indices)].astype(np.float32)
+    out = _bipartition_subgraph(A_sub_np, device, n_thresholds=n_thresholds)
+
+    if out is None:
+        if not is_background:
+            foreground_indices.extend(node_indices.tolist())
+        return
+
+    bipartition_local, ncut_val, eigvec_local = out
+
+    if (ncut_val >= ncut_thresh or
+            not _is_eigenvec_stable(eigvec_local, stability_thresh=stability_thresh)):
+        if not is_background:
+            foreground_indices.extend(node_indices.tolist())
+        return
+
+    idx_A = node_indices[bipartition_local]
+    idx_B = node_indices[~bipartition_local]
+
+    for idx_half in (idx_A, idx_B):
+        _collect_leaf_indices_saliency(
+            A_full_np, idx_half, device,
+            ncut_thresh, stability_thresh, min_segment_size,
+            total_N, max_segment_ratio, n_thresholds,
+            foreground_indices
+        )
+
+
+def ncut_recursive_saliency(feats, dims, scales, init_image_size, tau=0, eps=1e-5,
+                             im_name='', no_binary_graph=False,
+                             method="baseline",
+                             ncut_thresh=0.2, stability_thresh=0.06,
+                             min_segment_size=20, max_segment_ratio=0.5,
+                             n_thresholds=50, **method_kwargs):
+    """
+    Recursive NCut adapted for saliency detection.
+
+    Instead of producing bounding boxes, all non-background leaf segments are
+    merged into a single binary foreground mask, which is then passed to the
+    bilateral solver for smoothing — exactly the same pipeline as the single-cut
+    baseline, just with a richer foreground mask.
+
+    Args:
+        feats:            (D, N) patch features from ViTFeat — CLS already stripped.
+        dims:             [feat_h, feat_w]
+        ncut_thresh:      Stop recursing when NCut energy >= this value (default 0.2).
+        stability_thresh: Eigenvector bimodality threshold (default 0.06).
+        min_segment_size: Min patches to attempt a split (default 20).
+        max_segment_ratio: Segments > this fraction of all patches = background (default 0.5).
+        **method_kwargs:  Forwarded to the affinity method.
+
+    Returns:
+        bipartition — (feat_h, feat_w) float mask, 1=foreground 0=background
+        eigvec      — (feat_h, feat_w) second-smallest eigenvector of the first split
+        affinity    — (N, N) numpy affinity matrix
+    """
+    feat_h, feat_w = dims
+    device = feats.device
+
+    feats_n = F.normalize(feats, p=2, dim=0)
+    A = feats_n.transpose(0, 1) @ feats_n   # (N, N) cosine similarity
+
+    if method not in AFFINITY_METHODS:
+        raise ValueError(f"Unknown affinity method '{method}'. "
+                         f"Choose from: {list(AFFINITY_METHODS)}")
+    A = AFFINITY_METHODS[method](A, dims, **method_kwargs)
+
+    if no_binary_graph:
+        A = torch.where(A < tau, torch.tensor(eps, device=device, dtype=A.dtype), A)
+    else:
+        A = (A > tau).to(A.dtype)
+        A = torch.where(A == 0, torch.tensor(eps, device=device, dtype=A.dtype), A)
+
+    A_np = A.cpu().numpy().astype(np.float32)
+    N = A_np.shape[0]
+
+    # Compute first-split eigenvector for visualisation
+    d_i = A.sum(dim=1)
+    D_inv_sqrt = torch.diag(1.0 / d_i.sqrt())
+    A_sym = D_inv_sqrt @ A @ D_inv_sqrt
+    L_sym = torch.eye(N, device=device, dtype=A_sym.dtype) - A_sym
+    L_sym = (L_sym + L_sym.T) * 0.5
+    _, U = torch.linalg.eigh(L_sym)
+    eigvec_2d = (D_inv_sqrt @ U[:, 1]).cpu().numpy().reshape(feat_h, feat_w)
+
+    # Collect foreground leaf patch indices
+    foreground_indices = []
+    all_indices = np.arange(N, dtype=np.int64)
+
+    _collect_leaf_indices_saliency(
+        A_np, all_indices, device,
+        ncut_thresh, stability_thresh, min_segment_size,
+        N, max_segment_ratio, n_thresholds,
+        foreground_indices
+    )
+
+    if not foreground_indices:
+        # Fallback: single-cut baseline
+        _, bipartition, eigvec_2d, A_np = ncut(
+            feats, dims, scales, init_image_size, tau, eps,
+            im_name=im_name, no_binary_graph=no_binary_graph,
+            method=method, **method_kwargs
+        )
+        return bipartition, eigvec_2d, A_np
+
+    # Build combined foreground mask
+    fg_arr = np.array(foreground_indices, dtype=np.int64)
+    mask_2d = np.zeros((feat_h, feat_w), dtype=float)
+    mask_2d[fg_arr // feat_w, fg_arr % feat_w] = 1.0
+
+    return mask_2d, eigvec_2d, A_np
 
 
 # ---------------------------------------------------------------------------

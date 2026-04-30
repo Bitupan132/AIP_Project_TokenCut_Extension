@@ -3,6 +3,7 @@ sys.path.append('./model')
 import dino # model
 
 import object_discovery as tokencut
+from object_discovery import ncut_recursive_saliency
 import argparse
 import utils
 import bilateral_solver
@@ -26,16 +27,38 @@ ToTensor = transforms.Compose([
                                 transforms.Normalize((0.485, 0.456, 0.406),
                                                      (0.229, 0.224, 0.225)),])
 
-def get_tokencut_binary_map(img_pth, backbone, patch_size, tau, device, method="baseline", **method_kwargs):
+def get_tokencut_binary_map(img_pth, backbone, patch_size, tau, device,
+                            method="baseline", recursive=False,
+                            ncut_thresh=0.2, stability_thresh=0.06,
+                            min_segment_size=20, max_segment_ratio=0.5,
+                            **method_kwargs):
     I = Image.open(img_pth).convert('RGB')
+    # w, h are original PIL dimensions (width, height)
     I_resize, w, h, feat_w, feat_h = utils.resize_pil(I, patch_size)
 
     tensor = ToTensor(I_resize).unsqueeze(0).to(device)
-    feat = backbone(tensor)[0]
+    feat = backbone(tensor)[0]   # (D, N) — CLS already stripped by ViTFeat
 
-    seed, bipartition, eigvec, affinity = tokencut.ncut(
-        feat, [feat_h, feat_w], [patch_size, patch_size], [h, w], tau,
-        method=method, **method_kwargs)
+    if recursive:
+        bipartition, eigvec, affinity = ncut_recursive_saliency(
+            feat, [feat_h, feat_w], [patch_size, patch_size], [h, w], tau,
+            method=method,
+            ncut_thresh=ncut_thresh,
+            stability_thresh=stability_thresh,
+            min_segment_size=min_segment_size,
+            max_segment_ratio=max_segment_ratio,
+            **method_kwargs)
+    else:
+        _, bipartition, eigvec, affinity = tokencut.ncut(
+            feat, [feat_h, feat_w], [patch_size, patch_size], [h, w], tau,
+            method=method, **method_kwargs)
+
+    # Upsample bipartition and eigvec from feature-map resolution (feat_h, feat_w)
+    # to original image resolution (h, w) — required by the bilateral solver and
+    # overlay visualization. cv2.resize takes (width, height) order.
+    bipartition = cv2.resize(bipartition.astype(np.float32), (w, h))
+    eigvec = cv2.resize(eigvec.astype(np.float32), (w, h))
+
     return bipartition, eigvec, affinity
 
 def mask_color_compose(org, mask, mask_color = [173, 216, 230]) :
@@ -82,6 +105,19 @@ parser.add_argument('--affinity-method', type=str, default='baseline',
 parser.add_argument('--diffusion-gamma', type=float, default=0.1,
                     help="[Method B] Gamma for graph diffusion: E' = E + gamma * E^2.")
 
+# Recursive NCut
+parser.add_argument('--recursive', action='store_true', default=False,
+                    help='Use recursive NCut — merges all foreground leaf segments into '
+                         'one saliency mask before bilateral solving.')
+parser.add_argument('--ncut-threshold', type=float, default=0.2,
+                    help='[Recursive] Stop recursing when NCut energy >= this value (default 0.2).')
+parser.add_argument('--stability-threshold', type=float, default=0.06,
+                    help='[Recursive] Eigenvector bimodality threshold (default 0.06).')
+parser.add_argument('--min-segment-size', type=int, default=20,
+                    help='[Recursive] Min patches to attempt a split (default 20).')
+parser.add_argument('--max-segment-ratio', type=float, default=0.5,
+                    help='[Recursive] Segments covering > this fraction of patches are '
+                         'treated as background (default 0.5).')
 
 parser.add_argument('--dataset', type=str, default=None, choices=['ECSSD', 'DUTS', 'DUT', None], help='which dataset?')
 
@@ -168,6 +204,11 @@ for img_name in tqdm(img_list) :
     bipartition, eigvec, affinity = get_tokencut_binary_map(
         img_pth, backbone, args.patch_size, args.tau, device,
         method=args.affinity_method,
+        recursive=args.recursive,
+        ncut_thresh=args.ncut_threshold,
+        stability_thresh=args.stability_threshold,
+        min_segment_size=args.min_segment_size,
+        max_segment_ratio=args.max_segment_ratio,
         spatial_weight=args.spatial_weight, spatial_sigma=args.spatial_sigma,
         gamma=args.diffusion_gamma)
     mask_lost.append(bipartition)
